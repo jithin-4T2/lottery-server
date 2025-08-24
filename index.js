@@ -1,13 +1,9 @@
 const express = require('express');
-// Axios and pdf-parse are no longer needed as we are using manual data.
-// const axios = require('axios');
-// const pdf = require('pdf-parse');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // --- MANUAL DATA STRUCTURE ---
-// This has been fully updated with all prize data from the 8 PDFs you provided.
 const MANUAL_RESULTS = {
     "Today": { // KARUNYA LOTTERY NO.KR-720th (From KR-720.pdf)
         "drawName": "KARUNYA KR-720",
@@ -107,19 +103,12 @@ const MANUAL_RESULTS = {
     },
 };
 
-/**
- * This function retrieves and formats all prize data for a given date.
- * @param {string} date - The date key (e.g., "Today", "AUG 22").
- * @returns {Array} An array of all prize objects for that date.
- */
 function getAllPrizesForDate(date) {
     const resultsForDate = MANUAL_RESULTS[date];
     if (!resultsForDate) return [];
-
     const allPrizes = [];
-    // Loop through all prize tiers for the selected date
     for (const prizeName in resultsForDate) {
-        if (prizeName === 'drawName') continue; // Skip the drawName property
+        if (prizeName === 'drawName') continue;
         const prizeInfo = resultsForDate[prizeName];
         prizeInfo.numbers.forEach(number => {
             allPrizes.push({
@@ -133,7 +122,18 @@ function getAllPrizesForDate(date) {
     return allPrizes;
 }
 
-// Endpoint to get all results for a specific date
+// *** THIS IS THE NEW ENDPOINT THAT WAS MISSING ***
+app.get('/get-available-dates', (req, res) => {
+    const dates = Object.keys(MANUAL_RESULTS).map((dateKey, index) => {
+        return {
+            id: dateKey.replace(/\s/g, '-').toLowerCase() + `-${index}`,
+            date: dateKey,
+            drawName: MANUAL_RESULTS[dateKey].drawName
+        };
+    });
+    res.json(dates);
+});
+
 app.get('/get-all-results', (req, res) => {
     const { date } = req.query;
     if (!date) {
@@ -143,38 +143,29 @@ app.get('/get-all-results', (req, res) => {
     res.json(allPrizes);
 });
 
-// Endpoint to check a single ticket number against a specific date's results
 app.get('/check-ticket', (req, res) => {
   const { ticket, date } = req.query;
-
   if (!ticket || !date) {
     return res.status(400).json({ error: 'Ticket number and date are required.' });
   }
-
   const winningPrizesForDate = getAllPrizesForDate(date);
   if (winningPrizesForDate.length === 0) {
       return res.json({ result: 'lose', reason: `No results found for date: ${date}` });
   }
-
   const sanitizedTicket = ticket.replace(/\s/g, '').toUpperCase();
   let winResult = null;
-
-  // Check for a full match first (e.g., "KF 261432")
   const fullMatch = winningPrizesForDate.find(p => p.type === 'full' && p.number.replace(/\s/g, '') === sanitizedTicket);
   if (fullMatch) {
     winResult = { prize: fullMatch.prize, amount: fullMatch.amount };
   } else {
-    // If no full match, check for a partial match on the last 4 digits
     if (sanitizedTicket.length >= 4) {
         const lastFourDigitsOfTicket = sanitizedTicket.slice(-4);
         const partialMatch = winningPrizesForDate.find(p => p.type === 'endsWith' && p.number === lastFourDigitsOfTicket);
-        
         if (partialMatch) {
           winResult = { prize: partialMatch.prize, amount: partialMatch.amount };
         }
     }
   }
-
   if (winResult) {
       res.json({ result: 'win', details: winResult });
   } else {
