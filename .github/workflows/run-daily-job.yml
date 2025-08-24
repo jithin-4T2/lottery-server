@@ -1,0 +1,17 @@
+name: Daily Data Miner
+
+on:
+  schedule:
+    # This runs at 9:32 UTC, which is 3:02 PM in Kerala (IST)
+    - cron: '32 9 * * *'
+  workflow_dispatch: # Allows you to run this manually from the Actions tab on GitHub
+
+jobs:
+  run-data-miner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render server to start data miner
+        run: |
+          curl --request POST \
+            --url 'https://lottery-server-4t2.onrender.com/run-cron' \
+            --header 'Authorization: Bearer your-very-secret-key-12345'

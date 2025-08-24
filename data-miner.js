@@ -2,19 +2,76 @@ const axios = require('axios');
 const pdf = require('pdf-parse');
 const { Client } = require('pg');
 
+// --- CONFIGURATION ---
+
 // ▼▼▼ PASTE YOUR INTERNAL CONNECTION STRING FROM RENDER HERE ▼▼▼
 const connectionString = 'postgresql://lottery_database_k6c8_user:2RPtuGpaDg12zyyENA43swO11i6Qqozj@dpg-d2lijlvdiees73c2pvf0-a/lottery_database_k6c8';
 
-// This can be updated to fetch a dynamic URL later, but we use a fixed one for now.
-const pdfUrl = 'https://statelottery.kerala.gov.in/index.php/lottery-result-view';
-
-// --- DATABASE FUNCTIONS ---
+// The base URL for fetching PDFs by their serial number
+const baseUrl = 'https://result.keralalotteries.com/viewlotisresult.php?drawserial=';
 
 /**
+ * Fetches, parses, and saves the results for a single draw serial number.
+ * @param {number} serialNumber The draw serial number to process.
+ * @returns {Promise<boolean>} True if successful, false if the PDF does not exist.
+ */
+const processSingleDraw = async (serialNumber) => {
+  const pdfUrl = baseUrl + serialNumber;
+  
+  try {
+    console.log(`--- Attempting to process draw serial: ${serialNumber} ---`);
+    // 1. Download the PDF
+    const response = await axios.get(pdfUrl, { responseType: 'arraybuffer' });
+    
+    // 2. Parse the PDF
+    const data = await pdf(response.data);
+    console.log(`--- PDF found for ${serialNumber}. Parsing... ---`);
+
+    // 3. Extract structured data from the raw text
+    const { results, extraInfo } = parseLotteryResults(data.text);
+    console.log(`--- Parsed Data for: ${extraInfo.drawName} on ${extraInfo.drawDate} ---`);
+
+    // 4. Save the structured data to the database
+    await saveResultsToDB(results, extraInfo.drawName, extraInfo.drawDate);
+    return true; // Indicates success, so we should try the next number
+
+  } catch (error) {
+    // An error (especially a 404 Not Found) means this PDF doesn't exist yet.
+    if (error.response && error.response.status === 404) {
+      console.log(`--- No PDF found for serial ${serialNumber}. This is the latest result. ---`);
+    } else {
+      console.error(`An error occurred processing serial ${serialNumber}:`, error.message);
+    }
+    return false; // Indicates failure, so we should stop the loop
+  }
+};
+
+// --- MAIN FUNCTION ---
+/**
+ * Main function that loops through serial numbers until it finds the latest one.
+ */
+const main = async () => {
+  console.log('--- Starting Data Miner ---');
+
+  // In a more advanced version, this would first query the DB for the last saved number.
+  // For now, we start from a known recent number.
+  let currentSerial = 75000; 
+
+  while (true) {
+    const success = await processSingleDraw(currentSerial);
+    if (!success) {
+      // If we fail to get a PDF, we assume we've reached the end and stop.
+      break;
+    }
+    currentSerial++; // If successful, move to the next serial number
+  }
+
+  console.log('--- Data Miner finished its run. ---');
+};
+
+// --- DATABASE FUNCTIONS ---
+/**
  * Saves the parsed lottery results into the PostgreSQL database.
- * @param {object} parsedResults - The structured object of prize tiers and winning numbers.
- * @param {string} drawName - The name of the draw (e.g., "KARUNYA KR-720").
- * @param {string} drawDateStr - The date of the draw as a string (e.g., "23/08/2025").
  */
 const saveResultsToDB = async (parsedResults, drawName, drawDateStr) => {
   if (connectionString.includes('YOUR_INTERNAL_CONNECTION_STRING')) {
@@ -24,7 +81,6 @@ const saveResultsToDB = async (parsedResults, drawName, drawDateStr) => {
   
   const client = new Client({
     connectionString: connectionString,
-    // SSL is required when running on Render
     ssl: { rejectUnauthorized: false }
   });
 
@@ -36,16 +92,12 @@ const saveResultsToDB = async (parsedResults, drawName, drawDateStr) => {
     await client.connect();
     console.log('--- Connecting to DB to save results... ---');
 
-    // First, delete any existing results for this date to avoid duplicates
     await client.query('DELETE FROM lottery_results WHERE draw_date = $1', [sqlDate]);
     console.log(`--- Cleared any old results for ${sqlDate} ---`);
 
     let totalSaved = 0;
-    // Loop through each prize tier (e.g., "1st Prize", "4th Prize")
     for (const prizeTier in parsedResults) {
       const winningNumbers = parsedResults[prizeTier];
-      
-      // Loop through each number in the tier
       for (const number of winningNumbers) {
         const insertQuery = `
           INSERT INTO lottery_results (draw_name, draw_date, prize_tier, winning_number)
@@ -66,9 +118,10 @@ const saveResultsToDB = async (parsedResults, drawName, drawDateStr) => {
   }
 };
 
-
 // --- PDF PARSING FUNCTIONS ---
-
+/**
+ * Extracts numbers from a block of text between two keywords.
+ */
 function extractNumbersBetween(text, startKeyword, endKeyword, regex, skipFirst = false) {
   try {
     const startIndex = text.indexOf(startKeyword);
@@ -83,6 +136,9 @@ function extractNumbersBetween(text, startKeyword, endKeyword, regex, skipFirst 
   } catch (e) { return []; }
 }
 
+/**
+ * Parses the raw text from the lottery PDF to find all winning numbers.
+ */
 function parseLotteryResults(rawText) {
   const results = {};
   const fullTicketRegex = /[A-Z]{2}\s\d{6}/g;
@@ -99,7 +155,6 @@ function parseLotteryResults(rawText) {
   results['8th Prize'] = extractNumbersBetween(rawText, '8th Prize', '9th Prize', fourDigitRegex);
   results['9th Prize'] = extractNumbersBetween(rawText, '9th Prize', 'The prize winners', fourDigitRegex);
 
-  // Also extract draw name and date
   const drawNameMatch = rawText.match(/(\w+\s+LOTTERY NO\..*?)\s/);
   const drawDateMatch = rawText.match(/DRAW held on:-?\s*(\d{2}\/\d{2}\/\d{4})/);
 
@@ -111,24 +166,5 @@ function parseLotteryResults(rawText) {
   return { results, extraInfo };
 }
 
-
-// --- MAIN FUNCTION ---
-const main = async () => {
-  console.log('--- Starting Data Miner ---');
-  try {
-    const response = await axios.get(pdfUrl, { responseType: 'arraybuffer' });
-    const data = await pdf(response.data);
-    console.log('--- PDF Text Extracted, Now Parsing... ---');
-
-    const { results, extraInfo } = parseLotteryResults(data.text);
-    console.log(`--- Parsed Data for: ${extraInfo.drawName} on ${extraInfo.drawDate} ---`);
-    console.log(JSON.stringify(results, null, 2));
-
-    await saveResultsToDB(results, extraInfo.drawName, extraInfo.drawDate);
-
-  } catch (error) {
-    console.error('An error occurred during the main process:', error.message);
-  }
-};
-
-main();
+// Export the main function so other files can call it
+module.exports = { main };
