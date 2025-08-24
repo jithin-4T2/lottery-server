@@ -5,7 +5,7 @@ const { Client } = require('pg');
 // --- CONFIGURATION ---
 
 // ▼▼▼ PASTE YOUR INTERNAL CONNECTION STRING FROM RENDER HERE ▼▼▼
-const connectionString = 'postgresql://lottery_database_k6c8_user:2RPtuGpaDg12zyyENA43swO11i6Qqozj@dpg-d2lijlvdiees73c2pvf0-a/lottery_database_k6c8';
+const connectionString = 'postgresql://lottery_database_k6c8_user:2RPtuGpaDg12zyyENA43swO11i6Qqozj@dpg-d2lijlvdiees73c2pvf0-a.singapore-postgres.render.com/lottery_database_k6c8';
 
 // The base URL for fetching PDFs by their serial number
 const baseUrl = 'https://result.keralalotteries.com/viewlotisresult.php?drawserial=';

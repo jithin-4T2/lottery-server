@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 // --- CONFIGURATION ---
 
 // ▼▼▼ PASTE YOUR INTERNAL CONNECTION STRING FROM RENDER HERE ▼▼▼
-const connectionString = 'postgresql://lottery_database_k6c8_user:2RPtuGpaDg12zyyENA43swO11i6Qqozj@dpg-d2lijlvdiees73c2pvf0-a/lottery_database_k6c8';
+const connectionString = 'postgresql://lottery_database_k6c8_user:2RPtuGpaDg12zyyENA43swO11i6Qqozj@dpg-d2lijlvdiees73c2pvf0-a.singapore-postgres.render.com/lottery_database_k6c8';
 
 // A secret key to prevent others from running your miner. Must match the one in your .yml file.
 const CRON_SECRET = 'your-very-secret-key-12345'; 
