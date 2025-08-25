@@ -2,8 +2,8 @@ name: Daily Data Miner
 
 on:
   schedule:
-    # This runs at 9:32 UTC, which is 3:02 PM in Kerala (IST)
-    - cron: '32 9 * * *'
+    # This runs at 10:15 UTC, which is 3:45 PM in Kerala (IST)
+    - cron: '15 10 * * *'
   workflow_dispatch: # Allows you to run this manually from the Actions tab on GitHub
 
 jobs:
