@@ -16,8 +16,8 @@ const baseUrl = 'https://result.keralalotteries.com/viewlotisresult.php?drawseri
 const main = async () => {
   console.log('--- Starting Data Miner ---');
   
-  // UPDATED LOGIC: Always start searching from serial 7015
-  let currentSerial = 7015; 
+  // UPDATED LOGIC: Always start searching from serial 75000
+  let currentSerial = 75000; 
   console.log(`--- Starting search from fixed serial: ${currentSerial}. ---`);
 
   while (true) {
@@ -40,13 +40,23 @@ const processSingleDraw = async (serialNumber) => {
   const pdfUrl = baseUrl + serialNumber;
   try {
     const response = await axios.get(pdfUrl, { responseType: 'arraybuffer' });
+
+    // --- NEW FIX ---
+    // Check the 'Content-Type' header to ensure the downloaded file is a PDF.
+    const contentType = response.headers['content-type'];
+    if (!contentType || !contentType.includes('application/pdf')) {
+        console.log(`--- No PDF found for serial ${serialNumber}. Content-Type was ${contentType}. Stopping. ---`);
+        return false; // Treat as not found and stop the loop
+    }
+    // --- END OF FIX ---
+
     const data = await pdf(response.data);
     const { results, extraInfo } = parseLotteryResults(data.text);
     await saveResultsToDB(results, extraInfo, serialNumber);
     return true;
   } catch (error) {
     if (error.response && error.response.status === 404) {
-      console.log(`--- No PDF for serial ${serialNumber}. Stopping. ---`);
+      console.log(`--- No PDF for serial ${serialNumber} (404 Error). Stopping. ---`);
     } else {
       console.error(`Error processing serial ${serialNumber}:`, error.message);
     }
@@ -67,7 +77,6 @@ const saveResultsToDB = async (parsedResults, extraInfo, serialNumber) => {
     const sqlDate = extraInfo.drawDate.split('/').reverse().join('-');
     await client.connect();
     
-    // Delete old results for this date to prevent duplicates if the job is re-run
     await client.query('DELETE FROM lottery_results WHERE draw_date = $1', [sqlDate]);
 
     for (const prizeTier in parsedResults) {
