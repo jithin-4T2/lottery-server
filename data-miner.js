@@ -11,35 +11,20 @@ const connectionString = 'postgresql://lottery_database_k6c8_user:2RPtuGpaDg12zy
 const baseUrl = 'https://result.keralalotteries.com/viewlotisresult.php?drawserial=';
 
 /**
- * Main function that finds the last saved serial and loops through new ones.
+ * Main function that starts from a fixed serial and loops through new ones.
  */
 const main = async () => {
   console.log('--- Starting Data Miner ---');
-  const client = new Client({ connectionString, ssl: { rejectUnauthorized: false } });
-  let startSerial;
-
-  try {
-    // 1. Connect to the DB to get the last saved serial number
-    await client.connect();
-    const result = await client.query('SELECT MAX(draw_serial) as last_serial FROM lottery_results;');
-    
-    // If the table is empty, start from a default number. Otherwise, start from the next number.
-    startSerial = result.rows[0].last_serial ? result.rows[0].last_serial + 1 : 75000;
-    
-    console.log(`--- Last saved serial was ${startSerial - 1}. Starting search from ${startSerial}. ---`);
-  } catch (e) {
-    console.error("DB error when finding last serial. Starting from default 75000.", e);
-    startSerial = 75000;
-  } finally {
-    await client.end();
-  }
   
-  // 2. Loop through new serial numbers until one is not found
-  let currentSerial = startSerial;
+  // UPDATED LOGIC: Always start searching from serial 7015
+  let currentSerial = 7015; 
+  console.log(`--- Starting search from fixed serial: ${currentSerial}. ---`);
+
   while (true) {
     const success = await processSingleDraw(currentSerial);
     if (!success) {
-      break; // Stop if a PDF is not found
+      // Stop if a PDF is not found (meaning we've reached the end)
+      break; 
     }
     currentSerial++; // Move to the next number
   }
@@ -108,10 +93,8 @@ const saveResultsToDB = async (parsedResults, extraInfo, serialNumber) => {
  */
 const parseLotteryResults = (rawText) => {
   const results = {};
-  // Regex to find prize tiers and their amounts (e.g., "1st Prize...Rs :10,000,000")
   const prizeRegex = /((\d+)(?:st|nd|rd|th)\sPrize|Cons\sPrize)[\s\S]*?Rs\s*:([\d,]+)/;
 
-  // Split the entire text block by the start of each prize section
   const sections = rawText.split(/(?=(?:\d+)(?:st|nd|rd|th)\sPrize|Cons\sPrize)/);
 
   sections.forEach(section => {
@@ -123,10 +106,8 @@ const parseLotteryResults = (rawText) => {
       const fullTicketRegex = /[A-Z]{2}\s\d{6}/g;
       const fourDigitRegex = /\d{4}/g;
       
-      // Find all numbers in the section
       let numbers = section.match(fullTicketRegex) || section.match(fourDigitRegex) || [];
       
-      // Clean up the numbers list by removing the prize money if it was accidentally captured
       if (prizeTier.includes("Prize") && numbers.length > 0 && numbers[0] === match[3].replace(/,/g, '')) {
           numbers.shift();
       }
