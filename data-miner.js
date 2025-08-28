@@ -3,28 +3,39 @@ const pdf = require('pdf-parse');
 const { Client } = require('pg');
 
 // --- CONFIGURATION ---
-
-// ▼▼▼ PASTE YOUR INTERNAL CONNECTION STRING FROM RENDER HERE ▼▼▼
-const connectionString = 'postgresql://lottery_database_k6c8_user:2RPtuGpaDg12zyyENA43swO11i6Qqozj@dpg-d2lijlvdiees73c2pvf0-a/lottery_database_k6c8';
-
-// The base URL for fetching PDFs by their serial number
+const connectionString = 'YOUR_INTERNAL_CONNECTION_STRING';
 const baseUrl = 'https://result.keralalotteries.com/viewlotisresult.php?drawserial=';
 
 /**
- * Main function that starts from a fixed serial and loops through new ones.
+ * Main function that finds the last saved serial and loops through new ones.
  */
 const main = async () => {
   console.log('--- Starting Data Miner ---');
-  
-  // UPDATED LOGIC: Always start searching from serial 75000
-  let currentSerial = 75000; 
-  console.log(`--- Starting search from fixed serial: ${currentSerial}. ---`);
+  const client = new Client({ connectionString, ssl: { rejectUnauthorized: false } });
+  let startSerial;
 
+  try {
+    // 1. Connect to the DB to get the last saved serial number
+    await client.connect();
+    const result = await client.query('SELECT MAX(draw_serial) as last_serial FROM lottery_results;');
+    
+    // If the table is empty, start from a default number. Otherwise, start from the next number.
+    startSerial = result.rows[0].last_serial ? result.rows[0].last_serial + 1 : 75000;
+    
+    console.log(`--- Last saved serial was ${startSerial - 1}. Starting search from ${startSerial}. ---`);
+  } catch (e) {
+    console.error("DB error when finding last serial. Starting from default 75000.", e);
+    startSerial = 75000;
+  } finally {
+    await client.end();
+  }
+  
+  // 2. Loop through new serial numbers until one is not found
+  let currentSerial = startSerial;
   while (true) {
     const success = await processSingleDraw(currentSerial);
     if (!success) {
-      // Stop if a PDF is not found (meaning we've reached the end)
-      break; 
+      break; // Stop if a PDF is not found
     }
     currentSerial++; // Move to the next number
   }
@@ -40,23 +51,18 @@ const processSingleDraw = async (serialNumber) => {
   const pdfUrl = baseUrl + serialNumber;
   try {
     const response = await axios.get(pdfUrl, { responseType: 'arraybuffer' });
-
-    // --- NEW FIX ---
-    // Check the 'Content-Type' header to ensure the downloaded file is a PDF.
     const contentType = response.headers['content-type'];
     if (!contentType || !contentType.includes('application/pdf')) {
-        console.log(`--- No PDF found for serial ${serialNumber}. Content-Type was ${contentType}. Stopping. ---`);
-        return false; // Treat as not found and stop the loop
+        console.log(`--- No PDF found for serial ${serialNumber}. Content-Type was ${contentType}. ---`);
+        return false;
     }
-    // --- END OF FIX ---
-
     const data = await pdf(response.data);
     const { results, extraInfo } = parseLotteryResults(data.text);
     await saveResultsToDB(results, extraInfo, serialNumber);
     return true;
   } catch (error) {
     if (error.response && error.response.status === 404) {
-      console.log(`--- No PDF for serial ${serialNumber} (404 Error). Stopping. ---`);
+      console.log(`--- No PDF for serial ${serialNumber}. Stopping. ---`);
     } else {
       console.error(`Error processing serial ${serialNumber}:`, error.message);
     }
@@ -77,7 +83,9 @@ const saveResultsToDB = async (parsedResults, extraInfo, serialNumber) => {
     const sqlDate = extraInfo.drawDate.split('/').reverse().join('-');
     await client.connect();
     
-    await client.query('DELETE FROM lottery_results WHERE draw_date = $1', [sqlDate]);
+    // --- FIX ---
+    // The aggressive DELETE command has been removed.
+    // The main() function's logic prevents us from re-processing old serials.
 
     for (const prizeTier in parsedResults) {
       const prizeInfo = parsedResults[prizeTier];
@@ -103,7 +111,6 @@ const saveResultsToDB = async (parsedResults, extraInfo, serialNumber) => {
 const parseLotteryResults = (rawText) => {
   const results = {};
   const prizeRegex = /((\d+)(?:st|nd|rd|th)\sPrize|Cons\sPrize)[\s\S]*?Rs\s*:([\d,]+)/;
-
   const sections = rawText.split(/(?=(?:\d+)(?:st|nd|rd|th)\sPrize|Cons\sPrize)/);
 
   sections.forEach(section => {
@@ -111,16 +118,12 @@ const parseLotteryResults = (rawText) => {
     if (match) {
       const prizeTier = match[1].trim();
       const amount = `₹${match[3]}`;
-      
       const fullTicketRegex = /[A-Z]{2}\s\d{6}/g;
       const fourDigitRegex = /\d{4}/g;
-      
       let numbers = section.match(fullTicketRegex) || section.match(fourDigitRegex) || [];
-      
       if (prizeTier.includes("Prize") && numbers.length > 0 && numbers[0] === match[3].replace(/,/g, '')) {
           numbers.shift();
       }
-      
       results[prizeTier] = { amount, numbers };
     }
   });
