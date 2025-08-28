@@ -1,93 +1,130 @@
-const express = require('express');
-const { Pool } = require('pg');
-const { main: runDataMiner } = require('./data-miner.js');
+const axios = require('axios');
+const pdf = require('pdf-parse');
+const { Client } = require('pg');
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+// --- CONFIGURATION ---
 
-const connectionString = 'postgresql://lottery_database_k6c8_user:2RPtuGpaDg12zyyENA43swO11i6Qqozj@dpg-d2lijlvdiees73c2pvf0-a.singapore-postgres.render.com/lottery_database_k6c8';
-const CRON_SECRET = 'your-very-secret-key-12345';
+// ▼▼▼ PASTE YOUR INTERNAL CONNECTION STRING FROM RENDER HERE ▼▼▼
+const connectionString = 'postgresql://lottery_database_k6c8_user:2RPtuGpaDg12zyyENA43swO11i6Qqozj@dpg-d2lijlvdiees73c2pvf0-a/lottery_database_k6c8';
 
-if (connectionString.includes('YOUR_')) {
-  console.error('ERROR: Database connection string is not set in index.js.');
-}
+// The base URL for fetching PDFs by their serial number
+const baseUrl = 'https://result.keralalotteries.com/viewlotisresult.php?drawserial=';
 
-const pool = new Pool({
-  connectionString: connectionString,
-  ssl: { rejectUnauthorized: false }
-});
+/**
+ * Main function that starts from a fixed serial and loops through new ones.
+ */
+const main = async () => {
+  console.log('--- Starting Data Miner ---');
+  
+  // UPDATED LOGIC: Always start searching from serial 7000
+  let currentSerial = 7000; 
+  console.log(`--- Starting search from fixed serial: ${currentSerial}. ---`);
 
-app.get('/get-available-dates', async (req, res) => {
-  try {
-    const query = `SELECT DISTINCT draw_date, draw_name FROM lottery_results ORDER BY draw_date DESC;`;
-    const result = await pool.query(query);
-    const dates = result.rows.map((row, index) => {
-      const date = new Date(row.draw_date);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      date.setUTCHours(0, 0, 0, 0);
-      const isToday = today.getTime() === date.getTime();
-      const dateLabel = isToday ? 'Today' : date.toLocaleString('en-GB', { month: 'short', day: 'numeric', timeZone: 'UTC' }).toUpperCase();
-      return { id: `db-${index}`, date: dateLabel, sqlDate: row.draw_date.toISOString().split('T')[0], drawName: row.draw_name };
-    });
-    res.json(dates);
-  } catch (error) {
-    console.error('Error fetching available dates:', error);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-app.get('/get-all-results', async (req, res) => {
-  const { date } = req.query;
-  if (!date) { return res.status(400).json({ error: 'Date is required.' }); }
-  try {
-    const query = `SELECT prize_tier as prize, amount, winning_number as number, CASE WHEN LENGTH(winning_number) > 4 THEN 'full' ELSE 'endsWith' END as type FROM lottery_results WHERE draw_date = $1 ORDER BY id;`;
-    const result = await pool.query(query, [date]);
-    res.json(result.rows);
-  } catch (error) {
-    console.error('Error fetching all results:', error);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-app.get('/check-ticket', async (req, res) => {
-  const { ticket, date } = req.query;
-  if (!ticket || !date) { return res.status(400).json({ error: 'Ticket number and date are required.' }); }
-  try {
-    const sanitizedTicket = ticket.replace(/\s/g, '').toUpperCase();
-    let query = "SELECT prize_tier as prize, amount FROM lottery_results WHERE draw_date = $1 AND REPLACE(winning_number, ' ', '') = $2";
-    let result = await pool.query(query, [date, sanitizedTicket]);
-    if (result.rows.length > 0) {
-      return res.json({ result: 'win', details: result.rows[0] });
+  while (true) {
+    const success = await processSingleDraw(currentSerial);
+    if (!success) {
+      // Stop if a PDF is not found (meaning we've reached the end)
+      break; 
     }
-    if (sanitizedTicket.length >= 4) {
-      const lastFour = sanitizedTicket.slice(-4);
-      query = "SELECT prize_tier as prize, amount FROM lottery_results WHERE draw_date = $1 AND winning_number = $2";
-      result = await pool.query(query, [date, lastFour]);
-      if (result.rows.length > 0) {
-        return res.json({ result: 'win', details: result.rows[0] });
+    currentSerial++; // Move to the next number
+  }
+  console.log('--- Data Miner finished its run. ---');
+};
+
+/**
+ * Fetches, parses, and saves the results for a single draw serial number.
+ * @param {number} serialNumber The draw serial number to process.
+ * @returns {Promise<boolean>} True if successful, false if the PDF does not exist.
+ */
+const processSingleDraw = async (serialNumber) => {
+  const pdfUrl = baseUrl + serialNumber;
+  try {
+    const response = await axios.get(pdfUrl, { responseType: 'arraybuffer' });
+    const data = await pdf(response.data);
+    const { results, extraInfo } = parseLotteryResults(data.text);
+    await saveResultsToDB(results, extraInfo, serialNumber);
+    return true;
+  } catch (error) {
+    if (error.response && error.response.status === 404) {
+      console.log(`--- No PDF for serial ${serialNumber}. Stopping. ---`);
+    } else {
+      console.error(`Error processing serial ${serialNumber}:`, error.message);
+    }
+    return false;
+  }
+};
+
+/**
+ * Saves the parsed lottery results into the PostgreSQL database.
+ */
+const saveResultsToDB = async (parsedResults, extraInfo, serialNumber) => {
+  if (connectionString.includes('YOUR_')) {
+    console.error('ERROR: Connection string not set in data-miner.js.');
+    return;
+  }
+  const client = new Client({ connectionString, ssl: { rejectUnauthorized: false } });
+  try {
+    const sqlDate = extraInfo.drawDate.split('/').reverse().join('-');
+    await client.connect();
+    
+    // Delete old results for this date to prevent duplicates if the job is re-run
+    await client.query('DELETE FROM lottery_results WHERE draw_date = $1', [sqlDate]);
+
+    for (const prizeTier in parsedResults) {
+      const prizeInfo = parsedResults[prizeTier];
+      for (const number of prizeInfo.numbers) {
+        const query = `
+          INSERT INTO lottery_results (draw_name, draw_date, prize_tier, amount, winning_number, draw_serial) 
+          VALUES ($1, $2, $3, $4, $5, $6);
+        `;
+        await client.query(query, [extraInfo.drawName, sqlDate, prizeTier, prizeInfo.amount, number, serialNumber]);
       }
     }
-    res.json({ result: 'lose' });
+    console.log(`--- SUCCESS: Saved results for draw ${serialNumber}. ---`);
   } catch (error) {
-    console.error('Error checking ticket:', error);
-    res.status(500).json({ error: 'Internal Server Error' });
+    console.error('ERROR saving to DB:', error);
+  } finally {
+    await client.end();
   }
-});
+};
 
-app.post('/run-cron', async (req, res) => {
-  const providedSecret = req.headers['authorization'];
-  if (providedSecret !== `Bearer ${CRON_SECRET}`) {
-    return res.status(401).send('Unauthorized');
-  }
-  res.status(202).send('Accepted');
-  try {
-    await runDataMiner();
-  } catch (e) {
-    console.error('CRON JOB FAILED:', e);
-  }
-});
+/**
+ * Parses the raw text from the lottery PDF to find all winning numbers and amounts.
+ */
+const parseLotteryResults = (rawText) => {
+  const results = {};
+  const prizeRegex = /((\d+)(?:st|nd|rd|th)\sPrize|Cons\sPrize)[\s\S]*?Rs\s*:([\d,]+)/;
 
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-});
+  const sections = rawText.split(/(?=(?:\d+)(?:st|nd|rd|th)\sPrize|Cons\sPrize)/);
+
+  sections.forEach(section => {
+    const match = section.match(prizeRegex);
+    if (match) {
+      const prizeTier = match[1].trim();
+      const amount = `₹${match[3]}`;
+      
+      const fullTicketRegex = /[A-Z]{2}\s\d{6}/g;
+      const fourDigitRegex = /\d{4}/g;
+      
+      let numbers = section.match(fullTicketRegex) || section.match(fourDigitRegex) || [];
+      
+      if (prizeTier.includes("Prize") && numbers.length > 0 && numbers[0] === match[3].replace(/,/g, '')) {
+          numbers.shift();
+      }
+      
+      results[prizeTier] = { amount, numbers };
+    }
+  });
+
+  const drawNameMatch = rawText.match(/(\w+\s+LOTTERY NO\..*?)\s/);
+  const drawDateMatch = rawText.match(/DRAW held on:-?\s*(\d{2}\/\d{2}\/\d{4})/);
+  const extraInfo = {
+    drawName: drawNameMatch ? drawNameMatch[1].trim() : 'Unknown Draw',
+    drawDate: drawDateMatch ? drawDateMatch[1].trim() : 'Unknown Date'
+  };
+
+  return { results, extraInfo };
+};
+
+// Export the main function so it can be called by index.js for the cron job
+module.exports = { main };
